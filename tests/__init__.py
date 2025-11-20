@@ -1,0 +1,3 @@
+```python
+"""Tests package"""
+```

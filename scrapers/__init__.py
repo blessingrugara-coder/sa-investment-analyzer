@@ -1,0 +1,4 @@
+"""Scrapers package"""
+from scrapers.base_scraper import BaseScraper
+
+__all__ = ['BaseScraper']

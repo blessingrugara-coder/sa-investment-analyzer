@@ -1,0 +1,50 @@
+# Core
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Database
+sqlalchemy>=2.0.0
+alembic>=1.12.0
+
+# Data Sources
+openbb>=4.0.0
+yfinance>=0.2.40
+
+# Data Processing
+pandas>=2.1.0
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Quant Finance
+pypfopt>=1.5.5
+quantstats>=0.0.62
+empyrical>=0.5.5
+vectorbt>=0.26.0
+
+# Scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+selenium>=4.15.0
+pdfplumber>=0.10.0
+
+# Visualization
+matplotlib>=3.8.0
+plotly>=5.17.0
+
+# Dashboard
+streamlit>=1.28.0
+
+# Scheduling
+schedule>=1.2.0
+
+# Utilities
+rich>=13.7.0
+click>=8.1.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Code Quality
+black>=23.11.0
