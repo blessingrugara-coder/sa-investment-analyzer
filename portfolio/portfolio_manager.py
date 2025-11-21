@@ -1,8 +1,12 @@
 """
-Portfolio management - save, load, and manage portfolios
+Portfolio management - Enhanced with transaction ledger support
 """
 from database.session import get_session, get_db_session
-from database.models import Portfolio, PortfolioHolding, InvestmentProduct, Price
+from database.models import (
+    Portfolio, PortfolioHolding, InvestmentProduct, 
+    Transaction, TransactionType, CashPool
+)
+from analytics.ledger_calculator import LedgerCalculator
 from datetime import datetime, date
 import pandas as pd
 import logging
@@ -11,14 +15,14 @@ logger = logging.getLogger(__name__)
 
 
 class PortfolioManager:
-    """Manage portfolio operations"""
+    """Manage portfolio operations with transaction ledger support"""
     
     def __init__(self):
         self.session = None
     
     def create_portfolio(self, name, description=None):
         """
-        Create a new portfolio
+        Create a new portfolio with default cash pool
         
         Args:
             name: Portfolio name (must be unique)
@@ -45,23 +49,40 @@ class PortfolioManager:
                 session.add(portfolio)
                 session.flush()
                 
-                logger.info(f"Created portfolio: {name}")
+                # Create default cash pool
+                cash_pool = CashPool(
+                    portfolio_id=portfolio.id,
+                    name=f"{name} - Cash",
+                    currency='ZAR',
+                    account_type='CHECKING',
+                    current_balance=0.0
+                )
+                session.add(cash_pool)
+                
+                logger.info(f"Created portfolio: {name} with cash pool")
                 return portfolio
                 
         except Exception as e:
             logger.error(f"Error creating portfolio: {e}")
             return None
     
-    def add_holding(self, portfolio_name, ticker, quantity, entry_price, entry_date=None):
+    def add_transaction(self, portfolio_name: str, product_identifier: str,
+                       transaction_type: str, quantity: float, price: float,
+                       transaction_date: date = None, fees: float = 0,
+                       taxes: float = 0, notes: str = None) -> bool:
         """
-        Add a holding to portfolio
+        Add a transaction to portfolio (NEW method using ledger)
         
         Args:
             portfolio_name: Name of portfolio
-            ticker: Product identifier (e.g., 'NPN.JO')
+            product_identifier: Product ticker/identifier
+            transaction_type: BUY, SELL, DIVIDEND, etc.
             quantity: Number of shares/units
-            entry_price: Purchase price
-            entry_date: Purchase date (defaults to today)
+            price: Price per unit
+            transaction_date: Transaction date (defaults to today)
+            fees: Transaction fees
+            taxes: Taxes paid
+            notes: Optional notes
             
         Returns:
             True if successful, False otherwise
@@ -75,42 +96,87 @@ class PortfolioManager:
                     return False
                 
                 # Get product
-                product = session.query(InvestmentProduct).filter_by(identifier=ticker).first()
+                product = session.query(InvestmentProduct).filter_by(
+                    identifier=product_identifier
+                ).first()
                 if not product:
-                    logger.error(f"Product '{ticker}' not found")
+                    logger.error(f"Product '{product_identifier}' not found")
                     return False
                 
-                # Check if holding already exists
-                existing = session.query(PortfolioHolding).filter_by(
-                    portfolio_id=portfolio.id,
-                    product_id=product.id
+                # Get default cash pool
+                cash_pool = session.query(CashPool).filter_by(
+                    portfolio_id=portfolio.id
                 ).first()
                 
-                if existing:
-                    # Update existing holding
-                    existing.quantity += quantity
-                    logger.info(f"Updated holding: {ticker} in {portfolio_name}")
-                else:
-                    # Create new holding
-                    holding = PortfolioHolding(
-                        portfolio_id=portfolio.id,
-                        product_id=product.id,
-                        quantity=quantity,
-                        entry_price=entry_price,
-                        entry_date=entry_date or date.today()
-                    )
-                    session.add(holding)
-                    logger.info(f"Added holding: {ticker} to {portfolio_name}")
+                # Calculate amounts
+                gross_amount = quantity * price
+                net_amount = gross_amount + fees + taxes  # Total outflow for buy
                 
+                if transaction_type.upper() == 'SELL':
+                    net_amount = gross_amount - fees - taxes  # Total inflow for sell
+                
+                # Create transaction
+                txn = Transaction(
+                    portfolio_id=portfolio.id,
+                    product_id=product.id,
+                    cash_pool_id=cash_pool.id if cash_pool else None,
+                    transaction_type=TransactionType[transaction_type.upper()],
+                    transaction_date=transaction_date or date.today(),
+                    quantity=quantity if transaction_type.upper() == 'BUY' else -quantity,
+                    price=price,
+                    gross_amount=gross_amount,
+                    fees=fees,
+                    taxes=taxes,
+                    net_amount=net_amount if transaction_type.upper() == 'BUY' else -net_amount,
+                    notes=notes,
+                    currency='ZAR'
+                )
+                session.add(txn)
+                
+                # Update cash pool if exists
+                if cash_pool:
+                    if transaction_type.upper() == 'BUY':
+                        cash_pool.current_balance -= net_amount
+                    elif transaction_type.upper() == 'SELL':
+                        cash_pool.current_balance += abs(net_amount)
+                
+                logger.info(f"Added {transaction_type} transaction: {product_identifier} to {portfolio_name}")
                 return True
                 
         except Exception as e:
-            logger.error(f"Error adding holding: {e}")
+            logger.error(f"Error adding transaction: {e}")
             return False
+    
+    def add_holding(self, portfolio_name, ticker, quantity, entry_price, entry_date=None):
+        """
+        Add a holding (LEGACY method - converts to transaction)
+        Kept for backward compatibility
+        
+        Args:
+            portfolio_name: Name of portfolio
+            ticker: Product identifier
+            quantity: Number of shares/units
+            entry_price: Purchase price
+            entry_date: Purchase date (defaults to today)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        return self.add_transaction(
+            portfolio_name=portfolio_name,
+            product_identifier=ticker,
+            transaction_type='BUY',
+            quantity=quantity,
+            price=entry_price,
+            transaction_date=entry_date or date.today(),
+            fees=0,
+            taxes=0,
+            notes="Added via legacy add_holding method"
+        )
     
     def get_portfolio(self, portfolio_name):
         """
-        Get portfolio with all holdings
+        Get portfolio with all holdings (calculated from transactions)
         
         Returns:
             DataFrame with holdings or None
@@ -123,33 +189,40 @@ class PortfolioManager:
                 session.close()
                 return None
             
-            holdings = session.query(PortfolioHolding).filter_by(
-                portfolio_id=portfolio.id
-            ).all()
-            
-            if not holdings:
-                session.close()
-                return pd.DataFrame()
-            
-            data = []
-            for holding in holdings:
-                product = holding.product
-                data.append({
-                    'Ticker': product.identifier,
-                    'Name': product.name,
-                    'Type': product.product_type.title(),
-                    'Quantity': holding.quantity,
-                    'Entry Price': holding.entry_price,
-                    'Entry Date': holding.entry_date,
-                    'Cost Basis': holding.quantity * holding.entry_price,
-                    'Category': product.category
-                })
+            # Use LedgerCalculator to get holdings
+            calculator = LedgerCalculator(portfolio.id, session)
+            holdings_df = calculator.get_holdings_detail()
             
             session.close()
-            return pd.DataFrame(data)
+            return holdings_df
             
         except Exception as e:
             logger.error(f"Error getting portfolio: {e}")
+            return None
+    
+    def get_portfolio_transactions(self, portfolio_name):
+        """
+        Get all transactions for a portfolio
+        
+        Returns:
+            DataFrame with transaction history
+        """
+        try:
+            session = get_session()
+            
+            portfolio = session.query(Portfolio).filter_by(name=portfolio_name).first()
+            if not portfolio:
+                session.close()
+                return None
+            
+            calculator = LedgerCalculator(portfolio.id, session)
+            transactions_df = calculator.get_transaction_summary()
+            
+            session.close()
+            return transactions_df
+            
+        except Exception as e:
+            logger.error(f"Error getting transactions: {e}")
             return None
     
     def list_portfolios(self):
@@ -162,7 +235,7 @@ class PortfolioManager:
                 'Name': p.name,
                 'Description': p.description or '',
                 'Created': p.created_date,
-                'Holdings': len(p.holdings)
+                'Holdings': len(LedgerCalculator(p.id, session).get_current_holdings())
             } for p in portfolios]
             
             session.close()
@@ -173,7 +246,7 @@ class PortfolioManager:
             return pd.DataFrame()
     
     def delete_portfolio(self, portfolio_name):
-        """Delete a portfolio"""
+        """Delete a portfolio (cascade deletes transactions and cash pools)"""
         try:
             with get_db_session() as session:
                 portfolio = session.query(Portfolio).filter_by(name=portfolio_name).first()
@@ -188,29 +261,92 @@ class PortfolioManager:
     
     def get_portfolio_summary(self, portfolio_name):
         """
-        Get portfolio summary statistics
+        Get portfolio summary statistics (using ledger calculator)
         
         Returns:
             Dict with summary stats
         """
-        holdings_df = self.get_portfolio(portfolio_name)
-        
-        if holdings_df is None or holdings_df.empty:
+        try:
+            session = get_session()
+            
+            portfolio = session.query(Portfolio).filter_by(name=portfolio_name).first()
+            if not portfolio:
+                session.close()
+                return None
+            
+            calculator = LedgerCalculator(portfolio.id, session)
+            
+            # Get performance summary
+            perf_summary = calculator.get_performance_summary()
+            
+            # Get holdings detail
+            holdings_df = calculator.get_holdings_detail()
+            
+            if holdings_df.empty:
+                session.close()
+                return {
+                    'total_value': 0,
+                    'num_holdings': 0,
+                    'by_type': {},
+                    'by_category': {}
+                }
+            
+            total_value = holdings_df['Cost Basis'].sum()
+            
+            # Group by type
+            by_type = holdings_df.groupby('Type')['Cost Basis'].sum()
+            type_allocation = (by_type / total_value * 100).round(2)
+            
+            # Group by category
+            by_category = holdings_df.groupby('Category')['Cost Basis'].sum()
+            category_allocation = (by_category / total_value * 100).round(2)
+            
+            session.close()
+            
+            return {
+                'total_value': total_value,
+                'cost_basis': perf_summary['cost_basis'],
+                'num_holdings': perf_summary['num_holdings'],
+                'total_income': perf_summary['total_income'],
+                'realized_gains': perf_summary['realized_gains'],
+                'by_type': type_allocation.to_dict(),
+                'by_category': category_allocation.to_dict()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting portfolio summary: {e}")
             return None
+    
+    def get_cash_pools(self, portfolio_name):
+        """
+        Get all cash pools for a portfolio
         
-        total_value = holdings_df['Cost Basis'].sum()
-        
-        # Group by type
-        by_type = holdings_df.groupby('Type')['Cost Basis'].sum()
-        type_allocation = (by_type / total_value * 100).round(2)
-        
-        # Group by category
-        by_category = holdings_df.groupby('Category')['Cost Basis'].sum()
-        category_allocation = (by_category / total_value * 100).round(2)
-        
-        return {
-            'total_value': total_value,
-            'num_holdings': len(holdings_df),
-            'by_type': type_allocation.to_dict(),
-            'by_category': category_allocation.to_dict()
-        }
+        Returns:
+            DataFrame with cash pool details
+        """
+        try:
+            session = get_session()
+            
+            portfolio = session.query(Portfolio).filter_by(name=portfolio_name).first()
+            if not portfolio:
+                session.close()
+                return None
+            
+            cash_pools = session.query(CashPool).filter_by(
+                portfolio_id=portfolio.id,
+                is_active=True
+            ).all()
+            
+            data = [{
+                'Name': cp.name,
+                'Currency': cp.currency,
+                'Type': cp.account_type or 'CHECKING',
+                'Balance': cp.current_balance
+            } for cp in cash_pools]
+            
+            session.close()
+            return pd.DataFrame(data)
+            
+        except Exception as e:
+            logger.error(f"Error getting cash pools: {e}")
+            return None
