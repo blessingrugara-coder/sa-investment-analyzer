@@ -1,12 +1,62 @@
 """
 Main Streamlit dashboard for SA Investment Analyzer
+Updated with Transaction Ledger UI
 """
 import streamlit as st
 import pandas as pd
+from datetime import date, datetime
 from config.logging_config import setup_logging
 from database.session import get_session
-from database.models import InvestmentProduct
+from database.models import InvestmentProduct, TransactionType
+from portfolio.portfolio_manager import PortfolioManager
+from analytics.ledger_calculator import LedgerCalculator
 import logging
+
+# Setup
+setup_logging()
+logger = logging.getLogger(__name__)
+
+# Page configuration
+st.set_page_config(
+    page_title="SA Investment Analyzer",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# [Keep all the existing CSS - the glassmorphism styling]
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Crimson+Pro:wght@300;400;600&display=swap');
+* { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+:root {
+    --bg-primary: #FAFAF9; --bg-secondary: #F5F5F4; --bg-glass: rgba(255, 255, 255, 0.7);
+    --border-soft: rgba(120, 113, 108, 0.12); --text-primary: #1C1917; --text-secondary: #57534E;
+    --text-muted: #A8A29E; --accent-primary: #2563EB; --accent-secondary: #7C3AED;
+    --success: #059669; --warning: #D97706; --error: #DC2626;
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05); --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1); --radius: 12px;
+}
+.stApp { background: linear-gradient(135deg, #FAFAF9 0%, #F5F5F4 100%); background-attachment: fixed; }
+[data-testid="stSidebar"] { background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(20px) saturate(180%);
+    border-right: 1px solid var(--border-soft); box-shadow: var(--shadow-lg); }
+[data-testid="stSidebar"] h1 { font-family: 'Crimson Pro', serif; font-weight: 600; font-size: 1.75rem;
+    color: var(--text-primary); margin-bottom: 0.5rem; letter-spacing: -0.02em; }
+.main .block-container { padding: 3rem 2rem; max-width: 1400px; }
+h1, h2, h3 { font-family: 'Crimson Pro', serif; color: var(--text-primary); font-weight: 600; letter-spacing: -0.02em; }
+[data-testid="metric-container"] { background: var(--bg-glass); backdrop-filter: blur(10px);
+    border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 1.5rem;
+    box-shadow: var(--shadow-sm); transition: all 0.3s ease; }
+[data-testid="metric-container"]:hover { transform: translateY(-2px); box-shadow: var(--shadow-md);
+    border-color: var(--accent-primary); }
+.stButton > button { background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+    color: white; border: none; border-radius: var(--radius); padding: 0.75rem 1.5rem;
+    font-weight: 500; font-size: 0.95rem; box-shadow: var(--shadow-sm);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); cursor: pointer; }
+.stButton > button:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); opacity: 0.95; }
+</style>
+""", unsafe_allow_html=True)
+
 
 def get_product_count():
     """Get total number of products in database"""
@@ -24,15 +74,11 @@ def search_products(query, product_type):
     """Search for products in database"""
     try:
         session = get_session()
-        
-        # Start with base query
         q = session.query(InvestmentProduct)
         
-        # Filter by product type if not "All"
         if product_type != "All":
             q = q.filter(InvestmentProduct.product_type == product_type.lower())
         
-        # Search in name, identifier, or category
         if query:
             search_term = f"%{query}%"
             q = q.filter(
@@ -44,12 +90,11 @@ def search_products(query, product_type):
         results = q.all()
         session.close()
         
-        # Convert to DataFrame
         if results:
             data = [{
                 'Code': p.identifier,
                 'Name': p.name,
-                'Type': p.product_type.title(),
+                'Type': p.asset_class.value.replace('_', ' ').title() if p.asset_class else p.product_type.title(),
                 'Category': p.category,
                 'Provider': p.provider
             } for p in results]
@@ -61,553 +106,6 @@ def search_products(query, product_type):
         logger.error(f"Error searching products: {e}")
         return None
 
-# Setup
-setup_logging()
-logger = logging.getLogger(__name__)
-
-# Page configuration
-st.set_page_config(
-    page_title="SA Investment Analyzer",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS - Neo-Minimal Glass Bento Design
-st.markdown("""
-<style>
-/* Import elegant fonts */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Crimson+Pro:wght@300;400;600&display=swap');
-
-/* Global styling */
-* {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-}
-
-/* Root variables - Soft, warm neutrals with contrast */
-:root {
-    --bg-primary: #FAFAF9;
-    --bg-secondary: #F5F5F4;
-    --bg-glass: rgba(255, 255, 255, 0.7);
-    --border-soft: rgba(120, 113, 108, 0.12);
-    --text-primary: #1C1917;
-    --text-secondary: #57534E;
-    --text-muted: #A8A29E;
-    --accent-primary: #2563EB;
-    --accent-secondary: #7C3AED;
-    --success: #059669;
-    --warning: #D97706;
-    --error: #DC2626;
-    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08);
-    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
-    --radius: 12px;
-}
-
-/* Main app background - textured */
-.stApp {
-    background: linear-gradient(135deg, #FAFAF9 0%, #F5F5F4 100%);
-    background-attachment: fixed;
-}
-
-/* Sidebar - Glassmorphism */
-[data-testid="stSidebar"] {
-    background: rgba(255, 255, 255, 0.85);
-    backdrop-filter: blur(20px) saturate(180%);
-    -webkit-backdrop-filter: blur(20px) saturate(180%);
-    border-right: 1px solid var(--border-soft);
-    box-shadow: var(--shadow-lg);
-}
-
-[data-testid="stSidebar"] > div:first-child {
-    padding: 2rem 1.5rem;
-}
-
-/* Sidebar title styling */
-[data-testid="stSidebar"] h1 {
-    font-family: 'Crimson Pro', serif;
-    font-weight: 600;
-    font-size: 1.75rem;
-    color: var(--text-primary);
-    margin-bottom: 0.5rem;
-    letter-spacing: -0.02em;
-}
-
-/* Sidebar radio buttons - Bento-style contained buttons */
-[data-testid="stSidebar"] .row-widget.stRadio > div {
-    gap: 0.5rem;
-}
-
-[data-testid="stSidebar"] .row-widget.stRadio > div label {
-    background: var(--bg-glass);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius);
-    padding: 0.75rem 1rem;
-    margin: 0;
-    cursor: pointer;
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    font-weight: 500;
-    color: var(--text-secondary);
-}
-
-[data-testid="stSidebar"] .row-widget.stRadio > div label:hover {
-    background: rgba(255, 255, 255, 0.95);
-    border-color: var(--accent-primary);
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-md);
-}
-
-[data-testid="stSidebar"] .row-widget.stRadio > div label[data-checked="true"] {
-    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
-    color: white;
-    border-color: transparent;
-    box-shadow: var(--shadow-md);
-}
-
-/* Main content area - Bento grid feeling */
-.main .block-container {
-    padding: 3rem 2rem;
-    max-width: 1400px;
-}
-
-/* Headers - Elegant serif */
-h1, h2, h3 {
-    font-family: 'Crimson Pro', serif;
-    color: var(--text-primary);
-    font-weight: 600;
-    letter-spacing: -0.02em;
-}
-
-h1 {
-    font-size: 2.5rem;
-    margin-bottom: 0.5rem;
-    background: linear-gradient(135deg, var(--text-primary), var(--text-secondary));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-}
-
-h2 {
-    font-size: 1.875rem;
-    margin-top: 2rem;
-    margin-bottom: 1rem;
-}
-
-h3 {
-    font-size: 1.5rem;
-    margin-top: 1.5rem;
-    margin-bottom: 0.75rem;
-}
-
-/* Metric cards - Glass bento boxes */
-[data-testid="stMetricValue"] {
-    font-size: 2rem;
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-[data-testid="stMetricLabel"] {
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    font-weight: 500;
-}
-
-[data-testid="metric-container"] {
-    background: var(--bg-glass);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius);
-    padding: 1.5rem;
-    box-shadow: var(--shadow-sm);
-    transition: all 0.3s ease;
-}
-
-[data-testid="metric-container"]:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-md);
-    border-color: var(--accent-primary);
-}
-
-/* Buttons - Soft, elevated */
-.stButton > button {
-    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
-    color: white;
-    border: none;
-    border-radius: var(--radius);
-    padding: 0.75rem 1.5rem;
-    font-weight: 500;
-    font-size: 0.95rem;
-    box-shadow: var(--shadow-sm);
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    cursor: pointer;
-}
-
-.stButton > button:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-lg);
-    opacity: 0.95;
-}
-
-.stButton > button:active {
-    transform: translateY(0);
-}
-
-/* Primary button variant */
-.stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
-    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
-}
-
-/* Input fields - Neo-minimal with texture */
-.stTextInput > div > div > input,
-.stNumberInput > div > div > input,
-.stSelectbox > div > div > div,
-.stDateInput > div > div > input {
-    background: var(--bg-glass);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius);
-    padding: 0.75rem 1rem;
-    color: var(--text-primary);
-    font-size: 0.95rem;
-    transition: all 0.3s ease;
-}
-
-.stTextInput > div > div > input:focus,
-.stNumberInput > div > div > input:focus,
-.stSelectbox > div > div > div:focus-within,
-.stDateInput > div > div > input:focus {
-    border-color: var(--accent-primary);
-    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-    outline: none;
-}
-
-/* Dataframe tables - Bento contained style */
-[data-testid="stDataFrame"] {
-    background: var(--bg-glass);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius);
-    padding: 1rem;
-    box-shadow: var(--shadow-sm);
-    overflow: hidden;
-}
-
-/* Table headers */
-[data-testid="stDataFrame"] thead tr th {
-    background: var(--bg-secondary);
-    color: var(--text-secondary);
-    font-weight: 600;
-    font-size: 0.875rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 1rem;
-    border-bottom: 2px solid var(--border-soft);
-}
-
-/* Table rows */
-[data-testid="stDataFrame"] tbody tr {
-    border-bottom: 1px solid var(--border-soft);
-    transition: background 0.2s ease;
-}
-
-[data-testid="stDataFrame"] tbody tr:hover {
-    background: rgba(37, 99, 235, 0.05);
-}
-
-[data-testid="stDataFrame"] tbody tr td {
-    padding: 1rem;
-    color: var(--text-primary);
-}
-
-/* Tabs - Bento sections */
-.stTabs [data-baseweb="tab-list"] {
-    gap: 0.5rem;
-    background: var(--bg-secondary);
-    padding: 0.5rem;
-    border-radius: var(--radius);
-    border: 1px solid var(--border-soft);
-}
-
-.stTabs [data-baseweb="tab"] {
-    background: transparent;
-    border: none;
-    border-radius: calc(var(--radius) - 4px);
-    color: var(--text-secondary);
-    font-weight: 500;
-    padding: 0.75rem 1.5rem;
-    transition: all 0.3s ease;
-}
-
-.stTabs [data-baseweb="tab"]:hover {
-    background: var(--bg-glass);
-    color: var(--text-primary);
-}
-
-.stTabs [aria-selected="true"] {
-    background: white !important;
-    color: var(--accent-primary) !important;
-    box-shadow: var(--shadow-sm);
-}
-
-/* Info/Warning/Error boxes - Soft glass containers */
-.stAlert {
-    background: var(--bg-glass);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius);
-    padding: 1rem 1.5rem;
-    border-left: 4px solid;
-}
-
-.stAlert[data-baseweb="notification"][kind="info"] {
-    border-left-color: var(--accent-primary);
-    background: rgba(37, 99, 235, 0.05);
-}
-
-.stAlert[data-baseweb="notification"][kind="success"] {
-    border-left-color: var(--success);
-    background: rgba(5, 150, 105, 0.05);
-}
-
-.stAlert[data-baseweb="notification"][kind="warning"] {
-    border-left-color: var(--warning);
-    background: rgba(217, 119, 6, 0.05);
-}
-
-.stAlert[data-baseweb="notification"][kind="error"] {
-    border-left-color: var(--error);
-    background: rgba(220, 38, 38, 0.05);
-}
-
-/* Expander - Contained sections */
-.streamlit-expanderHeader {
-    background: var(--bg-glass);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius);
-    padding: 1rem 1.5rem;
-    font-weight: 500;
-    color: var(--text-primary);
-    transition: all 0.3s ease;
-}
-
-.streamlit-expanderHeader:hover {
-    border-color: var(--accent-primary);
-    box-shadow: var(--shadow-sm);
-}
-
-.streamlit-expanderContent {
-    background: var(--bg-glass);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--border-soft);
-    border-top: none;
-    border-radius: 0 0 var(--radius) var(--radius);
-    padding: 1.5rem;
-}
-
-/* Dividers - Soft and subtle */
-hr {
-    border: none;
-    height: 1px;
-    background: linear-gradient(to right, transparent, var(--border-soft), transparent);
-    margin: 2rem 0;
-}
-
-/* Spinners - Elegant loading */
-.stSpinner > div {
-    border-color: var(--accent-primary) transparent transparent transparent;
-}
-
-/* Balloons and confetti colors */
-.balloon {
-    filter: hue-rotate(200deg);
-}
-
-/* Column gaps - Bento spacing */
-[data-testid="column"] {
-    padding: 0.5rem;
-}
-
-/* Progress bars - Gradient */
-.stProgress > div > div > div > div {
-    background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
-    border-radius: 10px;
-}
-
-/* Select boxes - Glass style */
-[data-baseweb="select"] > div {
-    background: var(--bg-glass);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius);
-}
-
-/* Scrollbar styling */
-::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-}
-
-::-webkit-scrollbar-track {
-    background: var(--bg-secondary);
-    border-radius: 10px;
-}
-
-::-webkit-scrollbar-thumb {
-    background: var(--text-muted);
-    border-radius: 10px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: var(--text-secondary);
-}
-
-/* Animation for page transitions */
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
-.main .block-container {
-    animation: fadeIn 0.5s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-/* Hover effects for interactive elements */
-[data-testid="stDataFrame"] tbody tr,
-[data-testid="metric-container"],
-.stButton > button,
-[data-testid="stSidebar"] .row-widget.stRadio > div label {
-    will-change: transform;
-}
-
-/* Caption and small text - Elegant typography */
-.caption, small {
-    font-size: 0.875rem;
-    color: var(--text-muted);
-    font-weight: 400;
-}
-
-/* Code blocks - Subtle glass container */
-code {
-    background: var(--bg-glass);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--border-soft);
-    border-radius: 6px;
-    padding: 0.2rem 0.4rem;
-    font-size: 0.9em;
-    color: var(--accent-primary);
-}
-
-pre {
-    background: var(--bg-glass);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius);
-    padding: 1rem;
-}
-
-/* Download button special styling */
-.stDownloadButton > button {
-    background: var(--bg-glass);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--border-soft);
-    color: var(--accent-primary);
-}
-
-.stDownloadButton > button:hover {
-    background: white;
-    border-color: var(--accent-primary);
-}
-</style>
-""", unsafe_allow_html=True)
-
-def glass_card(title, content, icon="", color="primary"):
-    """Create a beautiful glass card component"""
-    color_map = {
-        "primary": "var(--accent-primary)",
-        "success": "var(--success)",
-        "warning": "var(--warning)",
-        "error": "var(--error)"
-    }
-    
-    st.markdown(f"""
-    <div style="
-        background: var(--bg-glass);
-        backdrop-filter: blur(10px);
-        border: 1px solid var(--border-soft);
-        border-radius: var(--radius);
-        padding: 1.5rem;
-        margin: 1rem 0;
-        box-shadow: var(--shadow-sm);
-        border-left: 4px solid {color_map.get(color, color_map['primary'])};
-    ">
-        <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
-            <span style="font-size: 1.5rem;">{icon}</span>
-            <h3 style="margin: 0; font-family: 'Crimson Pro', serif; color: var(--text-primary);">{title}</h3>
-        </div>
-        <div style="color: var(--text-secondary);">
-            {content}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-def bento_metric(label, value, delta=None, icon=""):
-    """Create a bento-style metric box using Streamlit native components"""
-    
-    # Create a container with custom styling
-    st.markdown(f"""
-    <div style="
-        background: rgba(255, 255, 255, 0.7);
-        backdrop-filter: blur(10px);
-        border: 1px solid rgba(120, 113, 108, 0.12);
-        border-radius: 12px;
-        padding: 1rem;
-        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-        min-height: 120px;
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-    ">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span style="
-                color: #A8A29E;
-                font-size: 0.75rem;
-                text-transform: uppercase;
-                letter-spacing: 0.05em;
-                font-weight: 600;
-            ">{label}</span>
-            <span style="font-size: 1.5rem; opacity: 0.3;">{icon}</span>
-        </div>
-        <div style="
-            font-size: 2rem;
-            font-weight: 600;
-            color: #1C1917;
-            font-family: 'Crimson Pro', serif;
-            margin: 0.5rem 0;
-        ">{value}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-
-def section_header(title, subtitle=""):
-    """Create an elegant section header"""
-    st.markdown(f"""
-    <div style="margin: 2rem 0 1.5rem 0;">
-        <h2 style="
-            font-family: 'Crimson Pro', serif;
-            font-size: 2rem;
-            font-weight: 600;
-            color: var(--text-primary);
-            margin-bottom: 0.25rem;
-            letter-spacing: -0.02em;
-        ">{title}</h2>
-        {f'<p style="color: var(--text-secondary); font-size: 1rem; margin: 0;">{subtitle}</p>' if subtitle else ''}
-    </div>
-    """, unsafe_allow_html=True)
 
 def main():
     """Main application"""
@@ -619,12 +117,12 @@ def main():
         
         page = st.radio(
             "Navigation",
-            ["🏠 Dashboard", "🔍 Product Search", "🏗️ Portfolio Builder",
-             "📊 Analytics", "⚙️ Settings"]
+            ["🏠 Dashboard", "🔍 Product Search", "💼 Transactions", 
+             "🏗️ Portfolio Builder", "📊 Analytics", "⚙️ Settings"]
         )
         
         st.divider()
-        st.caption("v1.0.0")
+        st.caption("v1.1.0 - Transaction Ledger")
         st.caption("Made with ❤️ for SA investors")
     
     # Main content
@@ -632,6 +130,8 @@ def main():
         show_dashboard()
     elif "Product Search" in page:
         show_product_search()
+    elif "Transactions" in page:
+        show_transactions()
     elif "Portfolio Builder" in page:
         show_portfolio_builder()
     elif "Analytics" in page:
@@ -639,302 +139,330 @@ def main():
     elif "Settings" in page:
         show_settings()
 
+
 def show_dashboard():
-    """Dashboard page - Beautiful neo-minimal design"""
-    
-    # Hero section
+    """Dashboard page"""
     st.markdown("""
     <div style="margin-bottom: 3rem;">
-        <h1 style="
-            font-family: 'Crimson Pro', serif;
-            font-size: 3rem;
-            font-weight: 600;
+        <h1 style="font-family: 'Crimson Pro', serif; font-size: 3rem; font-weight: 600;
             background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 0.5rem;
-        ">📊 Investment Dashboard</h1>
-        <p style="
-            color: var(--text-secondary);
-            font-size: 1.125rem;
-            margin: 0;
-        ">Your institutional-grade portfolio analytics</p>
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.5rem;">
+            📊 Investment Dashboard</h1>
+        <p style="color: var(--text-secondary); font-size: 1.125rem; margin: 0;">
+            Your institutional-grade portfolio analytics</p>
     </div>
     """, unsafe_allow_html=True)
     
-    # Get data
     product_count = get_product_count()
-    
-    from portfolio.portfolio_manager import PortfolioManager
     pm = PortfolioManager()
     portfolios = pm.list_portfolios()
     portfolio_count = len(portfolios)
     
-    # Bento metrics grid
+    # Metrics
     col1, col2, col3, col4 = st.columns(4)
-    
     with col1:
-        bento_metric("Investment Products", f"{product_count:,}", icon="🏢")
-    
+        st.metric("Investment Products", f"{product_count:,}")
     with col2:
-        bento_metric("Portfolios", str(portfolio_count), icon="💼")
-    
+        st.metric("Portfolios", str(portfolio_count))
     with col3:
-        if product_count > 0 and portfolio_count > 0:
-            bento_metric("System Status", "Ready", icon="✅")
-        else:
-            bento_metric("System Status", "Setup", icon="⚙️")
-    
+        st.metric("System Status", "✅ Ready" if product_count > 0 else "⚙️ Setup")
     with col4:
-        bento_metric("Data Updated", "Today", icon="🔄")
+        st.metric("Data Updated", "Today")
     
     st.markdown("<div style='height: 2rem;'></div>", unsafe_allow_html=True)
     
-    # Quick actions section
-    section_header("Quick Actions", "Get started with these common tasks")
-    
+    # Quick actions
+    st.subheader("Quick Actions")
     col1, col2, col3 = st.columns(3)
-    
     with col1:
-        st.button("🔍 Search Products", use_container_width=True, key="btn_search")
-    
+        if st.button("🔍 Search Products", use_container_width=True):
+            st.switch_page("app.py")
     with col2:
-        st.button("🏗️ Build Portfolio", use_container_width=True, key="btn_build")
-    
+        if st.button("💼 Add Transaction", use_container_width=True):
+            st.switch_page("app.py")
     with col3:
-        st.button("📊 View Analytics", use_container_width=True, key="btn_analytics")
-    
-    st.markdown("<div style='height: 2rem;'></div>", unsafe_allow_html=True)
-    
-    # Status cards
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if product_count == 0:
-            st.markdown("""
-            <div style="
-                background: var(--bg-glass);
-                backdrop-filter: blur(10px);
-                border: 1px solid var(--border-soft);
-                border-radius: var(--radius);
-                padding: 1.5rem;
-                margin: 1rem 0;
-                box-shadow: var(--shadow-sm);
-                border-left: 4px solid var(--warning);
-            ">
-                <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
-                    <span style="font-size: 1.5rem;">🗄️</span>
-                    <h3 style="margin: 0; font-family: 'Crimson Pro', serif; color: var(--text-primary);">Build Your Database</h3>
-                </div>
-                <div style="color: var(--text-secondary);">
-                    <p><strong>Get started by adding investment products</strong></p>
-                    <p>Run this command to add sample JSE stocks and ETFs:</p>
-                    <div style="background: rgba(0,0,0,0.05); padding: 0.75rem; border-radius: 8px; margin-top: 0.5rem;">
-                        <code style="color: var(--accent-primary); font-family: monospace;">python scripts\\add_sample_data.py</code>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        elif product_count < 50:
-            st.markdown(f"""
-            <div style="
-                background: var(--bg-glass);
-                backdrop-filter: blur(10px);
-                border: 1px solid var(--border-soft);
-                border-radius: var(--radius);
-                padding: 1.5rem;
-                margin: 1rem 0;
-                box-shadow: var(--shadow-sm);
-                border-left: 4px solid var(--accent-primary);
-            ">
-                <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
-                    <span style="font-size: 1.5rem;">📈</span>
-                    <h3 style="margin: 0; font-family: 'Crimson Pro', serif; color: var(--text-primary);">Expand Your Universe</h3>
-                </div>
-                <div style="color: var(--text-secondary);">
-                    <p><strong>You have {product_count} products</strong></p>
-                    <p>Add more JSE stocks, unit trusts, and ETFs to get the most out of your analysis.</p>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div style="
-                background: var(--bg-glass);
-                backdrop-filter: blur(10px);
-                border: 1px solid var(--border-soft);
-                border-radius: var(--radius);
-                padding: 1.5rem;
-                margin: 1rem 0;
-                box-shadow: var(--shadow-sm);
-                border-left: 4px solid var(--success);
-            ">
-                <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
-                    <span style="font-size: 1.5rem;">✨</span>
-                    <h3 style="margin: 0; font-family: 'Crimson Pro', serif; color: var(--text-primary);">Database Complete</h3>
-                </div>
-                <div style="color: var(--text-secondary);">
-                    <p><strong>{product_count} products available</strong></p>
-                    <p>Your product universe is well-stocked. Start building portfolios and analyzing performance!</p>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    with col2:
-        if portfolio_count == 0:
-            st.markdown("""
-            <div style="
-                background: var(--bg-glass);
-                backdrop-filter: blur(10px);
-                border: 1px solid var(--border-soft);
-                border-radius: var(--radius);
-                padding: 1.5rem;
-                margin: 1rem 0;
-                box-shadow: var(--shadow-sm);
-                border-left: 4px solid var(--accent-primary);
-            ">
-                <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
-                    <span style="font-size: 1.5rem;">💼</span>
-                    <h3 style="margin: 0; font-family: 'Crimson Pro', serif; color: var(--text-primary);">Create Your First Portfolio</h3>
-                </div>
-                <div style="color: var(--text-secondary);">
-                    <p><strong>Ready to track your investments?</strong></p>
-                    <p>Head to the Portfolio Builder to create your first portfolio and add holdings.</p>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div style="
-                background: var(--bg-glass);
-                backdrop-filter: blur(10px);
-                border: 1px solid var(--border-soft);
-                border-radius: var(--radius);
-                padding: 1.5rem;
-                margin: 1rem 0;
-                box-shadow: var(--shadow-sm);
-                border-left: 4px solid var(--success);
-            ">
-                <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
-                    <span style="font-size: 1.5rem;">🎯</span>
-                    <h3 style="margin: 0; font-family: 'Crimson Pro', serif; color: var(--text-primary);">Portfolio Overview</h3>
-                </div>
-                <div style="color: var(--text-secondary);">
-                    <p><strong>{portfolio_count} portfolio{'s' if portfolio_count != 1 else ''} active</strong></p>
-                    <p>View detailed analytics and performance metrics in the Analytics section.</p>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+        if st.button("📊 View Analytics", use_container_width=True):
+            st.switch_page("app.py")
     
     st.markdown("<div style='height: 2rem;'></div>", unsafe_allow_html=True)
     
     # Recent portfolios
     if not portfolios.empty:
-        section_header("Your Portfolios", "Manage and analyze your investments")
-        
+        st.subheader("Your Portfolios")
         for _, portfolio in portfolios.iterrows():
             with st.expander(f"💼 {portfolio['Name']}", expanded=False):
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Holdings", portfolio['Holdings'])
                 col2.metric("Created", portfolio['Created'].strftime('%Y-%m-%d'))
-                
                 desc = portfolio['Description'] if portfolio['Description'] else "_No description_"
                 col3.write(desc)
-                
-                if st.button(f"📊 Analyze", key=f"analyze_{portfolio['Name']}", use_container_width=True):
-                    st.info(f"Analytics for {portfolio['Name']} - Navigate to Analytics page")
+
 
 def show_product_search():
     """Product search page"""
     st.title("🔍 Product Search")
     
-    # Check if database has products
     product_count = get_product_count()
     
     if product_count == 0:
-        st.error("""
-        ### Database is Empty
-        
-        No investment products found in the database.
-        
-        **To add sample data, run:**
-```
-        python scripts\\add_sample_data.py
-```
-        
-        This will add 10 sample JSE stocks, ETFs, and indices.
-        """)
+        st.error("Database is empty. Run: `python scripts/add_sample_data.py`")
         return
     
     st.write(f"Search through {product_count:,} investment products")
     
-    # Search interface
     col1, col2 = st.columns([3, 1])
-    
     with col1:
         search_query = st.text_input(
             "Search by name, code, or category", 
-            placeholder="e.g., Naspers, NPN, bank, ETF",
-            key="search_input"
+            placeholder="e.g., Naspers, NPN, bank, ETF"
         )
-    
     with col2:
         product_type = st.selectbox(
             "Product Type",
-            ["All", "Equity", "ETF", "Index", "Unit_trust", "Money_market"]
+            ["All", "Equity", "ETF", "Index", "Unit_trust", "Money_market", "Bank_account", "FX"]
         )
     
-    # Search button
     if st.button("🔍 Search", type="primary") or search_query:
         with st.spinner("Searching..."):
             results = search_products(search_query, product_type)
             
             if results is not None and len(results) > 0:
                 st.success(f"Found {len(results)} results")
-                
-                # Display results
-                st.dataframe(
-                    results,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Code": st.column_config.TextColumn("Code", width="small"),
-                        "Name": st.column_config.TextColumn("Name", width="large"),
-                        "Type": st.column_config.TextColumn("Type", width="small"),
-                        "Category": st.column_config.TextColumn("Category", width="medium"),
-                        "Provider": st.column_config.TextColumn("Provider", width="small"),
-                    }
-                )
-                
-                # Show details for first result
-                if st.checkbox("Show details for first result"):
-                    first = results.iloc[0]
-                    st.subheader(f"Details: {first['Name']}")
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Code", first['Code'])
-                    with col2:
-                        st.metric("Type", first['Type'])
-                    with col3:
-                        st.metric("Category", first['Category'])
-                    
+                st.dataframe(results, use_container_width=True, hide_index=True)
             elif results is not None:
                 st.warning(f"No results found for '{search_query}'")
-                st.info("Try searching for: naspers, bank, etf, or index")
             else:
-                st.error("Error performing search. Check logs for details.")
+                st.error("Error performing search")
+
+
+def show_transactions():
+    """NEW: Transaction management page"""
+    st.title("💼 Transaction Manager")
+    
+    pm = PortfolioManager()
+    portfolios = pm.list_portfolios()
+    
+    if portfolios.empty:
+        st.warning("No portfolios found. Create a portfolio first!")
+        return
+    
+    # Portfolio selector
+    selected_portfolio = st.selectbox(
+        "Select Portfolio",
+        portfolios['Name'].tolist()
+    )
+    
+    tabs = st.tabs(["➕ Add Transaction", "📋 Transaction History", "📊 Summary"])
+    
+    with tabs[0]:
+        show_add_transaction_form(selected_portfolio)
+    
+    with tabs[1]:
+        show_transaction_history(selected_portfolio)
+    
+    with tabs[2]:
+        show_transaction_summary(selected_portfolio)
+
+
+def show_add_transaction_form(portfolio_name):
+    """Form to add new transaction"""
+    st.subheader("Add New Transaction")
+    
+    # Get products
+    session = get_session()
+    products = session.query(InvestmentProduct).all()
+    session.close()
+    
+    if not products:
+        st.warning("No products in database")
+        return
+    
+    # Product selector
+    product_options = {f"{p.identifier} - {p.name}": p.identifier for p in products}
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        selected_option = st.selectbox("Product", list(product_options.keys()))
+        ticker = product_options[selected_option]
+        
+        transaction_type = st.selectbox(
+            "Transaction Type",
+            ["BUY", "SELL", "DIVIDEND", "INTEREST", "FEE"]
+        )
+        
+        quantity = st.number_input("Quantity", min_value=0.01, step=1.0, value=100.0)
+    
+    with col2:
+        price = st.number_input("Price per Unit (ZAR)", min_value=0.01, step=0.01, value=100.0)
+        
+        transaction_date = st.date_input("Transaction Date", value=date.today())
+        
+        fees = st.number_input("Fees (ZAR)", min_value=0.0, step=0.01, value=0.0)
+    
+    taxes = st.number_input("Taxes (ZAR)", min_value=0.0, step=0.01, value=0.0)
+    notes = st.text_area("Notes (optional)", placeholder="Add any additional information")
+    
+    # Show calculation
+    gross = quantity * price
+    net = gross + fees + taxes if transaction_type == "BUY" else gross - fees - taxes
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Gross Amount", f"R {gross:,.2f}")
+    col2.metric("Fees + Taxes", f"R {fees + taxes:,.2f}")
+    col3.metric("Net Amount", f"R {net:,.2f}")
+    
+    if st.button("➕ Add Transaction", type="primary", use_container_width=True):
+        pm = PortfolioManager()
+        success = pm.add_transaction(
+            portfolio_name=portfolio_name,
+            product_identifier=ticker,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            price=price,
+            transaction_date=transaction_date,
+            fees=fees,
+            taxes=taxes,
+            notes=notes
+        )
+        
+        if success:
+            st.success(f"✅ Added {transaction_type} transaction!")
+            st.balloons()
+            st.rerun()
+        else:
+            st.error("Failed to add transaction")
+
+
+def show_transaction_history(portfolio_name):
+    """Show all transactions for portfolio"""
+    st.subheader("Transaction History")
+    
+    pm = PortfolioManager()
+    transactions = pm.get_portfolio_transactions(portfolio_name)
+    
+    if transactions is None or transactions.empty:
+        st.info("No transactions yet. Add your first transaction!")
+        return
+    
+    # Filter options
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        filter_type = st.multiselect(
+            "Filter by Type",
+            options=transactions['Type'].unique().tolist(),
+            default=transactions['Type'].unique().tolist()
+        )
+    with col2:
+        filter_product = st.multiselect(
+            "Filter by Product",
+            options=transactions['Product'].unique().tolist(),
+            default=transactions['Product'].unique().tolist()
+        )
+    with col3:
+        date_range = st.date_input(
+            "Date Range",
+            value=(transactions['Date'].min(), transactions['Date'].max()),
+            key="txn_date_range"
+        )
+    
+    # Apply filters
+    filtered = transactions[
+        (transactions['Type'].isin(filter_type)) &
+        (transactions['Product'].isin(filter_product))
+    ]
+    
+    if len(date_range) == 2:
+        filtered = filtered[
+            (filtered['Date'] >= date_range[0]) &
+            (filtered['Date'] <= date_range[1])
+        ]
+    
+    # Display
+    st.write(f"Showing {len(filtered)} of {len(transactions)} transactions")
+    st.dataframe(filtered, use_container_width=True, hide_index=True)
+    
+    # Export
+    if st.button("📥 Export to CSV"):
+        csv = filtered.to_csv(index=False)
+        st.download_button(
+            "Download CSV",
+            csv,
+            f"{portfolio_name}_transactions.csv",
+            "text/csv"
+        )
+
+
+def show_transaction_summary(portfolio_name):
+    """Show transaction summary statistics"""
+    st.subheader("Transaction Summary")
+    
+    session = get_session()
+    from database.models import Portfolio
+    portfolio = session.query(Portfolio).filter_by(name=portfolio_name).first()
+    
+    if not portfolio:
+        session.close()
+        return
+    
+    calc = LedgerCalculator(portfolio.id, session)
+    
+    # Performance summary
+    perf = calc.get_performance_summary()
+    
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Cost Basis", f"R {perf['cost_basis']:,.2f}")
+    col2.metric("Total Income", f"R {perf['total_income']:,.2f}")
+    col3.metric("Realized Gains", f"R {perf['realized_gains']:,.2f}")
+    col4.metric("Total Fees", f"R {perf['total_fees']:,.2f}")
+    
+    st.divider()
+    
+    # Income breakdown
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Income Breakdown**")
+        income_data = {
+            'Type': ['Dividends', 'Interest', 'Total'],
+            'Amount': [
+                f"R {perf['dividend_income']:,.2f}",
+                f"R {perf['interest_income']:,.2f}",
+                f"R {perf['total_income']:,.2f}"
+            ]
+        }
+        st.dataframe(pd.DataFrame(income_data), hide_index=True, use_container_width=True)
+    
+    with col2:
+        st.write("**Portfolio Stats**")
+        stats_data = {
+            'Metric': ['Holdings', 'Transactions', 'Cost Basis'],
+            'Value': [
+                perf['num_holdings'],
+                perf['num_transactions'],
+                f"R {perf['cost_basis']:,.2f}"
+            ]
+        }
+        st.dataframe(pd.DataFrame(stats_data), hide_index=True, use_container_width=True)
+    
+    # Income by product
+    st.divider()
+    st.write("**Income by Product**")
+    income_by_product = calc.get_income_by_product()
+    
+    if not income_by_product.empty:
+        st.dataframe(income_by_product, hide_index=True, use_container_width=True)
+    else:
+        st.info("No income recorded yet")
+    
+    session.close()
 
 
 def show_portfolio_builder():
-    """Portfolio builder page - FULLY FUNCTIONAL"""
+    """Portfolio builder page (legacy compatibility)"""
     st.title("🏗️ Portfolio Builder")
     
-    from portfolio.portfolio_manager import PortfolioManager
-    
     pm = PortfolioManager()
-    
-    # Portfolio selector
     portfolios = pm.list_portfolios()
     
     st.subheader("Select or Create Portfolio")
@@ -958,10 +486,8 @@ def show_portfolio_builder():
                 st.success(f"Deleted portfolio: {selected_portfolio}")
                 st.rerun()
     
-    # Create new portfolio
     if selected_portfolio == '-- Create New --':
         st.subheader("Create New Portfolio")
-        
         new_name = st.text_input("Portfolio Name", placeholder="My JSE Portfolio")
         new_desc = st.text_area("Description (optional)", placeholder="Long-term growth portfolio")
         
@@ -975,307 +501,160 @@ def show_portfolio_builder():
                     st.error("Portfolio name already exists")
             else:
                 st.error("Please enter a portfolio name")
-        
         st.stop()
     
-    # Work with selected portfolio
+    # Show portfolio details
     st.divider()
-    
-    tab1, tab2, tab3 = st.tabs(["➕ Add Holding", "📋 View Holdings", "📊 Summary"])
-    
-    with tab1:
-        st.subheader(f"Add Holding to '{selected_portfolio}'")
-        
-        # Get available products
-        session = get_session()
-        products = session.query(InvestmentProduct).all()
-        session.close()
-        
-        if not products:
-            st.warning("No products in database. Add products first!")
-            st.stop()
-        
-        # Create ticker options
-        ticker_options = {f"{p.identifier} - {p.name}": p.identifier for p in products}
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            selected_option = st.selectbox(
-                "Select Product",
-                options=list(ticker_options.keys())
-            )
-            ticker = ticker_options[selected_option]
-            
-            quantity = st.number_input("Quantity", min_value=0.01, step=1.0, value=100.0)
-        
-        with col2:
-            entry_price = st.number_input("Entry Price (ZAR)", min_value=0.01, step=0.01, value=100.0)
-            entry_date = st.date_input("Entry Date")
-        
-        # Show calculation
-        total_cost = quantity * entry_price
-        st.metric("Total Cost", f"R {total_cost:,.2f}")
-        
-        if st.button("➕ Add to Portfolio", type="primary"):
-            if pm.add_holding(selected_portfolio, ticker, quantity, entry_price, entry_date):
-                st.success(f"✓ Added {quantity} units of {ticker} @ R{entry_price:,.2f}")
-                st.balloons()
-                st.rerun()
-            else:
-                st.error("Failed to add holding. Check logs.")
-    
-    with tab2:
-        st.subheader(f"Holdings in '{selected_portfolio}'")
-        
-        holdings = pm.get_portfolio(selected_portfolio)
-        
-        if holdings is None or holdings.empty:
-            st.info("No holdings yet. Add your first holding in the 'Add Holding' tab!")
-        else:
-            # Display holdings table
-            st.dataframe(
-                holdings,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Entry Price": st.column_config.NumberColumn(
-                        "Entry Price",
-                        format="R %.2f"
-                    ),
-                    "Cost Basis": st.column_config.NumberColumn(
-                        "Cost Basis",
-                        format="R %.2f"
-                    ),
-                    "Quantity": st.column_config.NumberColumn(
-                        "Quantity",
-                        format="%.2f"
-                    )
-                }
-            )
-            
-            # Summary metrics
-            st.subheader("Portfolio Metrics")
-            
-            total_value = holdings['Cost Basis'].sum()
-            num_holdings = len(holdings)
-            
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Value", f"R {total_value:,.2f}")
-            col2.metric("Holdings", num_holdings)
-            col3.metric("Avg Position", f"R {total_value/num_holdings:,.2f}")
-    
-    with tab3:
-        st.subheader(f"Portfolio Summary: '{selected_portfolio}'")
-        
-        summary = pm.get_portfolio_summary(selected_portfolio)
-        
-        if summary is None:
-            st.info("Add holdings to see summary")
-        else:
-            # Key metrics
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Total Value", f"R {summary['total_value']:,.2f}")
-            with col2:
-                st.metric("Number of Holdings", summary['num_holdings'])
-            with col3:
-                st.metric("Asset Types", len(summary['by_type']))
-            
-            st.divider()
-            
-            # Allocation charts
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("Allocation by Type")
-                type_df = pd.DataFrame(list(summary['by_type'].items()), 
-                                      columns=['Type', 'Allocation %'])
-                st.bar_chart(type_df.set_index('Type'))
-                
-                # Show table
-                st.dataframe(type_df, hide_index=True, use_container_width=True)
-            
-            with col2:
-                st.subheader("Allocation by Category")
-                cat_df = pd.DataFrame(list(summary['by_category'].items()), 
-                                     columns=['Category', 'Allocation %'])
-                st.bar_chart(cat_df.set_index('Category'))
-                
-                # Show table
-                st.dataframe(cat_df, hide_index=True, use_container_width=True)
-
-
-def show_analytics():
-    """Analytics page - FULLY FUNCTIONAL"""
-    st.title("📊 Portfolio Analytics")
-    
-    from portfolio.portfolio_manager import PortfolioManager
-    from analytics.performance_calculator import PerformanceCalculator
-    
-    pm = PortfolioManager()
-    
-    # Portfolio selector
-    portfolios = pm.list_portfolios()
-    
-    if portfolios.empty:
-        st.warning("No portfolios found. Create a portfolio first in the Portfolio Builder!")
-        st.stop()
-    
-    selected_portfolio = st.selectbox(
-        "Select Portfolio to Analyze",
-        portfolios['Name'].tolist()
-    )
-    
-    # Get portfolio data
     holdings = pm.get_portfolio(selected_portfolio)
     
     if holdings is None or holdings.empty:
-        st.info(f"Portfolio '{selected_portfolio}' has no holdings yet.")
-        st.stop()
+        st.info("No holdings yet. Add transactions via the Transactions page!")
+    else:
+        st.subheader(f"Holdings in '{selected_portfolio}'")
+        st.dataframe(holdings, use_container_width=True, hide_index=True)
+        
+        # Summary
+        st.subheader("Portfolio Summary")
+        summary = pm.get_portfolio_summary(selected_portfolio)
+        
+        if summary:
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Value", f"R {summary['total_value']:,.2f}")
+            col2.metric("Holdings", summary['num_holdings'])
+            col3.metric("Total Income", f"R {summary['total_income']:,.2f}")
+
+
+def show_analytics():
+    """Analytics page with enhanced metrics"""
+    st.title("📊 Portfolio Analytics")
     
-    # Create calculator
-    calc = PerformanceCalculator(holdings)
+    pm = PortfolioManager()
+    portfolios = pm.list_portfolios()
     
-    # Tabs for different analytics
-    tabs = st.tabs(["📊 Overview", "🎯 Allocation", "📈 Holdings Detail", "⚖️ Diversification"])
+    if portfolios.empty:
+        st.warning("No portfolios found")
+        return
+    
+    selected_portfolio = st.selectbox("Select Portfolio", portfolios['Name'].tolist())
+    
+    # Get data with market values
+    holdings = pm.get_portfolio(selected_portfolio, include_market_values=True)
+    
+    if holdings is None or holdings.empty:
+        st.info("No holdings in this portfolio")
+        return
+    
+    # Get session for additional calculations
+    session = get_session()
+    from database.models import Portfolio
+    portfolio = session.query(Portfolio).filter_by(name=selected_portfolio).first()
+    
+    if not portfolio:
+        session.close()
+        return
+    
+    calc = LedgerCalculator(portfolio.id, session)
+    
+    # Tabs
+    tabs = st.tabs(["📊 Overview", "📈 Performance", "💰 Income", "💸 Costs", "🏆 Holdings"])
     
     with tabs[0]:
-        st.subheader("Portfolio Overview")
+        # Calculate totals
+        cost_basis = holdings['Cost Basis'].sum()
+        market_value = holdings['Market Value'].sum() if 'Market Value' in holdings.columns else cost_basis
+        unrealized_gain = holdings['Unrealized Gain'].sum() if 'Unrealized Gain' in holdings.columns else 0
         
-        # Summary stats
-        stats = calc.get_summary_stats()
+        perf = calc.get_performance_summary()
         
-        cols = st.columns(len(stats))
-        for col, (label, value) in zip(cols, stats.items()):
-            col.metric(label, value)
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Cost Basis", f"R {cost_basis:,.2f}")
+        col2.metric("Market Value", f"R {market_value:,.2f}", 
+                   f"R {unrealized_gain:,.2f}" if unrealized_gain != 0 else None)
+        col3.metric("Total Income", f"R {perf['total_income']:,.2f}")
+        col4.metric("Total Fees", f"R {perf['total_fees']:,.2f}")
         
         st.divider()
-        
-        # Holdings table
         st.subheader("All Holdings")
         st.dataframe(holdings, use_container_width=True, hide_index=True)
     
     with tabs[1]:
-        st.subheader("Asset Allocation Analysis")
+        st.subheader("Performance Metrics")
         
-        col1, col2 = st.columns(2)
+        # Get performance analysis
+        performance = pm.get_performance_analysis(selected_portfolio)
         
-        with col1:
-            st.write("**By Product Type**")
-            type_alloc = calc.calculate_type_allocation()
-            if type_alloc is not None:
-                st.dataframe(type_alloc, use_container_width=True)
-                st.bar_chart(type_alloc)
-        
-        with col2:
-            st.write("**By Category**")
-            cat_alloc = calc.calculate_category_allocation()
-            if cat_alloc is not None:
-                st.dataframe(cat_alloc, use_container_width=True)
-                st.bar_chart(cat_alloc)
-        
-        st.divider()
-        
-        st.subheader("Individual Position Sizes")
-        position_alloc = calc.calculate_allocation()
-        st.dataframe(position_alloc, use_container_width=True, hide_index=True)
-        st.bar_chart(position_alloc.set_index('Ticker')['Allocation %'])
+        if performance is None:
+            st.info("Insufficient data for performance analysis")
+        else:
+            # Returns section
+            st.write("**Returns**")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Total Return", f"{performance['total_return_pct']:.2f}%")
+            col2.metric("Annualized Return", f"{performance['annualized_return_pct']:.2f}%")
+            col3.metric("TWR", f"{performance['time_weighted_return_pct']:.2f}%")
+            col4.metric("MWR (IRR)", f"{performance['money_weighted_return_pct']:.2f}%")
+            
+            st.divider()
+            
+            # Risk metrics
+            st.write("**Risk Metrics**")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Volatility", f"{performance['volatility_pct']:.2f}%")
+            col2.metric("Max Drawdown", f"{performance['max_drawdown_pct']:.2f}%")
+            col3.metric("VaR (95%)", f"{performance['var_95']*100:.2f}%")
+            col4.metric("CVaR (95%)", f"{performance['cvar_95']*100:.2f}%")
+            
+            st.divider()
+            
+            # Risk-adjusted returns
+            st.write("**Risk-Adjusted Returns**")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Sharpe Ratio", f"{performance['sharpe_ratio']:.2f}")
+            col2.metric("Sortino Ratio", f"{performance['sortino_ratio']:.2f}")
+            col3.metric("Calmar Ratio", f"{performance['calmar_ratio']:.2f}")
+            
+            st.divider()
+            
+            # Summary stats
+            st.write("**Summary Statistics**")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Invested", f"R {performance.get('total_invested', 0):,.2f}")
+            col2.metric("Current Value", f"R {performance.get('end_value', 0):,.2f}")
+            col3.metric("Absolute Gain", f"R {performance.get('absolute_gain', 0):,.2f}")
+            
+            # Period info
+            st.caption(f"Period: {performance['start_date']} to {performance['end_date']} ({performance['num_periods']} days)")
     
     with tabs[2]:
-        st.subheader("Holdings Detail")
+        st.subheader("Income Analysis")
+        income_df = calc.get_income_by_product()
         
-        # Detailed view with all columns
-        st.dataframe(
-            holdings,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Entry Price": st.column_config.NumberColumn(format="R %.2f"),
-                "Cost Basis": st.column_config.NumberColumn(format="R %.2f"),
-            }
-        )
-        
-        # Export option
-        if st.button("📥 Export to CSV"):
-            csv = holdings.to_csv(index=False)
-            st.download_button(
-                "Download CSV",
-                csv,
-                f"{selected_portfolio}_holdings.csv",
-                "text/csv"
-            )
+        if not income_df.empty:
+            st.dataframe(income_df, use_container_width=True, hide_index=True)
+            st.bar_chart(income_df.set_index('Product')['Total Income'])
+        else:
+            st.info("No income recorded")
     
     with tabs[3]:
-        st.subheader("Diversification Analysis")
+        st.subheader("Costs & Fees")
+        fees = calc.calculate_total_fees()
         
-        score = calc.calculate_diversification_score()
-        
-        # Show score with color
-        if score >= 70:
-            st.success(f"Diversification Score: {score:.0f}/100 - Well Diversified")
-        elif score >= 40:
-            st.warning(f"Diversification Score: {score:.0f}/100 - Moderately Diversified")
-        else:
-            st.error(f"Diversification Score: {score:.0f}/100 - Needs More Diversification")
-        
-        # Progress bar
-        st.progress(score / 100)
-        
-        st.divider()
-        
-        st.write("**Diversification Tips:**")
-        
-        num_holdings = len(holdings)
-        if num_holdings < 10:
-            st.info(f"• Consider adding more holdings (current: {num_holdings}, recommended: 10-20)")
-        
-        allocation = calc.calculate_allocation()
-        max_position = allocation['Allocation %'].max()
-        if max_position > 20:
-            st.warning(f"• Largest position is {max_position:.1f}% - consider rebalancing (recommended max: 20%)")
-        
-        # Type diversification
-        type_count = calc.calculate_type_allocation()
-        if type_count is not None and len(type_count) == 1:
-            st.info("• Consider diversifying across different product types (stocks, ETFs, etc.)")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Fees", f"R {fees['fees']:,.2f}")
+        col2.metric("Total Taxes", f"R {fees['taxes']:,.2f}")
+        col3.metric("Total Costs", f"R {fees['total']:,.2f}")
+    
+    with tabs[4]:
+        st.subheader("Holdings Detail")
+        st.dataframe(holdings, use_container_width=True, hide_index=True)
+    
+    session.close()
+
 
 def show_settings():
     """Settings page"""
     st.title("⚙️ Settings")
-    
-    st.subheader("System Configuration")
-    
-    with st.expander("📊 Data Sources", expanded=True):
-        st.checkbox("Enable automatic data updates", value=True)
-        st.number_input("Update frequency (hours)", value=24, min_value=1, max_value=168)
-        
-        st.write("**Available data sources:**")
-        st.write("- yfinance (JSE stocks)")
-        st.write("- OpenBB Platform")
-        st.write("- Web scrapers (SENS, fund fact sheets)")
-    
-    with st.expander("🎨 Display Preferences"):
-        st.selectbox("Base Currency", ["ZAR", "USD", "EUR", "GBP"], index=0)
-        st.selectbox("Date Format", ["YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY"], index=0)
-        st.selectbox("Number Format", ["1,234.56", "1 234.56", "1.234,56"], index=0)
-    
-    with st.expander("🔔 Notifications"):
-        st.checkbox("Email notifications", value=False)
-        st.checkbox("Price alerts", value=False)
-        st.checkbox("Portfolio rebalancing alerts", value=False)
-    
-    st.divider()
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("💾 Save Settings", type="primary"):
-            st.success("Settings saved successfully!")
-    
-    with col2:
-        if st.button("🔄 Reset to Defaults"):
-            st.info("Settings reset to defaults")
+    st.info("Settings page - Coming soon!")
 
 
 if __name__ == "__main__":

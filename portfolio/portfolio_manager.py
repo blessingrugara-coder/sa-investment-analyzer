@@ -174,9 +174,13 @@ class PortfolioManager:
             notes="Added via legacy add_holding method"
         )
     
-    def get_portfolio(self, portfolio_name):
+    def get_portfolio(self, portfolio_name, include_market_values=True):
         """
         Get portfolio with all holdings (calculated from transactions)
+        
+        Args:
+            portfolio_name: Portfolio name
+            include_market_values: Include current prices and market values
         
         Returns:
             DataFrame with holdings or None
@@ -193,11 +197,63 @@ class PortfolioManager:
             calculator = LedgerCalculator(portfolio.id, session)
             holdings_df = calculator.get_holdings_detail()
             
+            if holdings_df.empty:
+                session.close()
+                return holdings_df
+            
+            # Add market values if requested
+            if include_market_values:
+                from data.price_fetcher import PriceFetcher
+                fetcher = PriceFetcher()
+                
+                current_prices = []
+                market_values = []
+                unrealized_gains = []
+                unrealized_pct = []
+                
+                for _, row in holdings_df.iterrows():
+                    # Get product
+                    product = session.query(InvestmentProduct).filter_by(
+                        identifier=row['Ticker']
+                    ).first()
+                    
+                    if product:
+                        # Get latest price
+                        current_price = fetcher.get_latest_price(product.id)
+                        
+                        if current_price:
+                            market_value = row['Quantity'] * current_price
+                            gain = market_value - row['Cost Basis']
+                            gain_pct = (gain / row['Cost Basis'] * 100) if row['Cost Basis'] > 0 else 0
+                        else:
+                            # Fallback to cost basis
+                            current_price = row['Avg Entry Price']
+                            market_value = row['Cost Basis']
+                            gain = 0
+                            gain_pct = 0
+                    else:
+                        current_price = row['Avg Entry Price']
+                        market_value = row['Cost Basis']
+                        gain = 0
+                        gain_pct = 0
+                    
+                    current_prices.append(current_price)
+                    market_values.append(market_value)
+                    unrealized_gains.append(gain)
+                    unrealized_pct.append(gain_pct)
+                
+                holdings_df['Current Price'] = current_prices
+                holdings_df['Market Value'] = market_values
+                holdings_df['Unrealized Gain'] = unrealized_gains
+                holdings_df['Gain %'] = unrealized_pct
+            
             session.close()
             return holdings_df
             
         except Exception as e:
             logger.error(f"Error getting portfolio: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def get_portfolio_transactions(self, portfolio_name):
@@ -279,42 +335,61 @@ class PortfolioManager:
             # Get performance summary
             perf_summary = calculator.get_performance_summary()
             
-            # Get holdings detail
-            holdings_df = calculator.get_holdings_detail()
+            # Get holdings with market values
+            holdings_df = self.get_portfolio(portfolio_name, include_market_values=True)
             
-            if holdings_df.empty:
+            if holdings_df is None or holdings_df.empty:
                 session.close()
                 return {
                     'total_value': 0,
+                    'market_value': 0,
+                    'cost_basis': 0,
                     'num_holdings': 0,
                     'by_type': {},
-                    'by_category': {}
+                    'by_category': {},
+                    'total_unrealized_gain': 0,
+                    'total_unrealized_pct': 0
                 }
             
-            total_value = holdings_df['Cost Basis'].sum()
+            cost_basis = holdings_df['Cost Basis'].sum()
             
-            # Group by type
-            by_type = holdings_df.groupby('Type')['Cost Basis'].sum()
-            type_allocation = (by_type / total_value * 100).round(2)
+            # Use market value if available, otherwise cost basis
+            if 'Market Value' in holdings_df.columns:
+                total_value = holdings_df['Market Value'].sum()
+                total_unrealized = holdings_df['Unrealized Gain'].sum()
+                total_unrealized_pct = (total_unrealized / cost_basis * 100) if cost_basis > 0 else 0
+            else:
+                total_value = cost_basis
+                total_unrealized = 0
+                total_unrealized_pct = 0
+            
+            # Group by type (using market value for allocation)
+            by_type = holdings_df.groupby('Type')['Market Value' if 'Market Value' in holdings_df.columns else 'Cost Basis'].sum()
+            type_allocation = (by_type / total_value * 100).round(2) if total_value > 0 else by_type * 0
             
             # Group by category
-            by_category = holdings_df.groupby('Category')['Cost Basis'].sum()
-            category_allocation = (by_category / total_value * 100).round(2)
+            by_category = holdings_df.groupby('Category')['Market Value' if 'Market Value' in holdings_df.columns else 'Cost Basis'].sum()
+            category_allocation = (by_category / total_value * 100).round(2) if total_value > 0 else by_category * 0
             
             session.close()
             
             return {
                 'total_value': total_value,
-                'cost_basis': perf_summary['cost_basis'],
+                'market_value': total_value,
+                'cost_basis': cost_basis,
                 'num_holdings': perf_summary['num_holdings'],
                 'total_income': perf_summary['total_income'],
                 'realized_gains': perf_summary['realized_gains'],
+                'total_unrealized_gain': total_unrealized,
+                'total_unrealized_pct': total_unrealized_pct,
                 'by_type': type_allocation.to_dict(),
                 'by_category': category_allocation.to_dict()
             }
             
         except Exception as e:
             logger.error(f"Error getting portfolio summary: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def get_cash_pools(self, portfolio_name):
@@ -349,4 +424,50 @@ class PortfolioManager:
             
         except Exception as e:
             logger.error(f"Error getting cash pools: {e}")
+            return None
+    
+    def get_performance_analysis(self, portfolio_name):
+        """
+        Get performance analysis for portfolio
+        
+        Returns:
+            Dict with performance metrics
+        """
+        try:
+            session = get_session()
+            
+            portfolio = session.query(Portfolio).filter_by(name=portfolio_name).first()
+            if not portfolio:
+                session.close()
+                return None
+            
+            calculator = LedgerCalculator(portfolio.id, session)
+            
+            # Import here to avoid circular dependencies
+            from analytics.portfolio_valuation_helper import PortfolioValuationHelper
+            from analytics.performance_metrics import PerformanceMetrics
+            
+            # Generate portfolio value series
+            helper = PortfolioValuationHelper(calculator)
+            portfolio_values, cash_flows = helper.get_performance_data_for_calculator()
+            
+            if portfolio_values.empty:
+                session.close()
+                return None
+            
+            # Calculate performance metrics
+            perf = PerformanceMetrics(portfolio_values, cash_flows)
+            metrics = perf.get_performance_summary()
+            
+            # Add summary stats
+            summary_stats = helper.generate_summary_statistics()
+            metrics.update(summary_stats)
+            
+            session.close()
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Error getting performance analysis: {e}")
+            import traceback
+            traceback.print_exc()
             return None
